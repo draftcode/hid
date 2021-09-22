@@ -9,44 +9,9 @@
 package hid
 
 /*
-#cgo CFLAGS: -I./hidapi/hidapi
-
-#cgo !hidraw,linux CFLAGS: -I. -I./libusb/libusb -DDEFAULT_VISIBILITY="" -DOS_LINUX -D_GNU_SOURCE -DPLATFORM_POSIX
-#cgo !hidraw,linux,!android LDFLAGS: -lrt
-#cgo !hidraw,linux,noiconv CFLAGS: -DNO_ICONV
-#cgo hidraw,linux CFLAGS: -DOS_LINUX -D_GNU_SOURCE -DHIDRAW
-#cgo hidraw,linux,!android pkg-config: libudev
-#cgo darwin CFLAGS: -DOS_DARWIN
-#cgo darwin LDFLAGS: -framework CoreFoundation -framework IOKit -framework AppKit
-#cgo windows CFLAGS: -DOS_WINDOWS
-#cgo windows LDFLAGS: -lsetupapi
-
-#ifdef OS_LINUX
-	#ifdef HIDRAW
-	#include "hidapi/linux/hid.c"
-	#else
-	#include <poll.h>
-	#include "os/events_posix.c"
-	#include "os/threads_posix.c"
-
-	#include "os/linux_usbfs.c"
-	#include "os/linux_netlink.c"
-
-	#include "core.c"
-	#include "descriptor.c"
-	#include "hotplug.c"
-	#include "io.c"
-	#include "strerror.c"
-	#include "sync.c"
-
-	#undef _GNU_SOURCE // it's already defined in the c-file
-	#include "hidapi/libusb/hid.c"
-	#endif
-#elif OS_DARWIN
-	#include "hidapi/mac/hid.c"
-#elif OS_WINDOWS
-	#include "hidapi/windows/hid.c"
-#endif
+#cgo pkg-config: hidapi-hidraw
+#include <stdlib.h>
+#include <hidapi.h>
 */
 import "C"
 
@@ -252,11 +217,38 @@ func (dev *Device) SendFeatureReport(b []byte) (int, error) {
 // This reproduces C.hid_read() behaviour in wrapping hid_read_timeout:
 // return hid_read_timeout(dev, data, length, (dev->blocking)? -1: 0);
 func (dev *Device) Read(b []byte) (int, error) {
-	var timeout int
-	if int(dev.device.blocking) == 1 {
-		timeout = -1
+	// Abort if nothing to read
+	if len(b) == 0 {
+		return 0, nil
 	}
-	return dev.ReadTimeout(b, timeout)
+	// Abort if device closed in between
+	dev.lock.Lock()
+	device := dev.device
+	dev.lock.Unlock()
+
+	if device == nil {
+		return 0, ErrDeviceClosed
+	}
+	// Execute the read operation
+	read := int(C.hid_read(device, (*C.uchar)(&b[0]), C.size_t(len(b))))
+	if read == -1 {
+		// If the read failed, verify if closed or other error
+		dev.lock.Lock()
+		device = dev.device
+		dev.lock.Unlock()
+
+		if device == nil {
+			return 0, ErrDeviceClosed
+		}
+		// Device not closed, some other error occurred
+		message := C.hid_error(device)
+		if message == nil {
+			return 0, errors.New("hidapi: unknown failure")
+		}
+		failure, _ := wcharTToString(message)
+		return 0, errors.New("hidapi: " + failure)
+	}
+	return read, nil
 }
 
 // ReadTimeout retrieves an input report from a HID device with a timeout. If timeout is -1 a
